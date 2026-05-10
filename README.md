@@ -1,5 +1,7 @@
 # MilkyWayReborn
-A multitasking tweak allow you to use various app on screen at once. This reborn version support iOS 17-26
+A multitasking tweak that allows you to use multiple apps on screen at once.
+
+This fork/branch adds support for iOS 16-style usage. It has been tested on iOS 16.7.2.
 
 # Preview
 ![](Preview.PNG)
