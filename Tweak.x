@@ -4,12 +4,14 @@
 #import "MWSceneHelper.h"
 #import "MWBackgrounderManager.h"
 #import "MWThemeManager.h"
+#import "MWSettingsWindow.h"
 
 #define SCALE_MODE_PLIST @"/var/mobile/Library/Preferences/com.milkyway.reborn.scalemode.plist"
 #define MW_LOG(fmt, ...) NSLog(@"[MilkyWayReborn] " fmt, ##__VA_ARGS__)
 
 // Static retention for RBSAssertions — prevents ARC from releasing them
 static NSMutableDictionary *_activeAssertions = nil;
+static dispatch_source_t _settingsSetupRetryTimer = nil;
 
 // Helper: find appLayout by walking superview chain
 static id mw_findAppLayout(UIView *view) {
@@ -116,6 +118,31 @@ static _UISceneLayerHostContainerView *mw_createSceneContainer(FBScene *scene) {
     return container;
 }
 
+static MWPassthroughWindow *mw_ensurePassthroughWindow(void) {
+    MWPassthroughWindow *window = [MWPassthroughWindow sharedInstance];
+    if (window) return window;
+
+    window = [[MWPassthroughWindow alloc] init];
+    window.frame = [UIScreen mainScreen].bounds;
+    window.backgroundColor = UIColor.clearColor;
+    window.clipsToBounds = YES;
+    window.windowLevel = UIWindowLevelAlert - 1;
+
+    if (!window.rootViewController) {
+        UIViewController *vc = [[UIViewController alloc] init];
+        MWPassthroughView *ptView = [[MWPassthroughView alloc] initWithFrame:window.bounds];
+        ptView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        ptView.backgroundColor = UIColor.clearColor;
+        vc.view = ptView;
+        window.rootViewController = vc;
+    }
+
+    [MWPassthroughWindow setSharedInstance:window];
+    window.hidden = NO;
+    MW_LOG(@"Passthrough window created lazily: %@", window);
+    return window;
+}
+
 // Helper: create a windowed view from a bundle ID
 static void mw_createWindowForApp(NSString *bundleID, NSString *sceneID) {
     if (!bundleID) return;
@@ -125,7 +152,7 @@ static void mw_createWindowForApp(NSString *bundleID, NSString *sceneID) {
     [[MWBackgrounderManager sharedInstance] setForeground:bundleID enabled:YES];
     [MWSceneHelper wakeUpScene:bundleID];
 
-    MWPassthroughWindow *hostWindow = [MWPassthroughWindow sharedInstance];
+    MWPassthroughWindow *hostWindow = mw_ensurePassthroughWindow();
     if (!hostWindow) {
         MW_LOG(@"ERROR: No host window");
         return;
@@ -282,6 +309,61 @@ static void mw_createWindowForApp(NSString *bundleID, NSString *sceneID) {
     });
 }
 
+void MWOpenBundleInWindow(NSString *bundleID) {
+    if (!bundleID.length) return;
+    MW_LOG(@"Manual Open in Window requested for %@", bundleID);
+
+    [(SpringBoard *)[UIApplication sharedApplication] launchApplicationWithIdentifier:bundleID suspended:YES];
+
+    __block dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(timer, dispatch_walltime(NULL, 0), 300 * NSEC_PER_MSEC, 50 * NSEC_PER_MSEC);
+    __block int attempts = 0;
+    dispatch_source_set_event_handler(timer, ^{
+        attempts++;
+        if (attempts > 25) {
+            MW_LOG(@"Manual Open in Window timed out waiting for scene: %@", bundleID);
+            dispatch_source_cancel(timer);
+            timer = nil;
+            return;
+        }
+
+        FBScene *scene = [MWSceneHelper getFBScene:bundleID];
+        if (!scene) return;
+
+        NSString *sceneID = nil;
+        if ([scene respondsToSelector:@selector(identifier)])
+            sceneID = [scene identifier];
+
+        MW_LOG(@"Manual Open in Window scene found: %@ for %@", sceneID, bundleID);
+        dispatch_source_cancel(timer);
+        timer = nil;
+        mw_createWindowForApp(bundleID, sceneID ?: bundleID);
+    });
+    dispatch_resume(timer);
+}
+
+static void mw_startSettingsSetupRetry(void) {
+    if (_settingsSetupRetryTimer) return;
+    MW_LOG(@"Starting settings setup retry timer");
+    _settingsSetupRetryTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(_settingsSetupRetryTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC),
+                              1 * NSEC_PER_SEC,
+                              100 * NSEC_PER_MSEC);
+    __block int attempts = 0;
+    dispatch_source_set_event_handler(_settingsSetupRetryTimer, ^{
+        attempts++;
+        MW_LOG(@"Settings setup retry attempt %d", attempts);
+        [MWSettingsWindow setupIfNeeded];
+        if ([MWSettingsWindow isAttached] || attempts >= 30) {
+            dispatch_source_cancel(_settingsSetupRetryTimer);
+            _settingsSetupRetryTimer = nil;
+            MW_LOG(@"Settings setup retry timer stopped, attached=%d", [MWSettingsWindow isAttached]);
+        }
+    });
+    dispatch_resume(_settingsSetupRetryTimer);
+}
+
 // ============================================================
 #pragma mark - SBApplication: Force Medusa capability
 // ============================================================
@@ -309,23 +391,31 @@ static void mw_createWindowForApp(NSString *bundleID, NSString *sceneID) {
     MW_LOG(@"SpringBoard launched, setting up MilkyWay Reborn");
     [MWThemeManager sharedInstance];
 
-    MWPassthroughWindow *window = [[MWPassthroughWindow alloc] init];
-    window.frame = [UIScreen mainScreen].bounds;
-    window.backgroundColor = [UIColor clearColor];
-    window.clipsToBounds = YES;
-
-    if ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad) {
-        UIViewController *vc = [[UIViewController alloc] init];
-        window.rootViewController = vc;
-        MWPassthroughView *ptView = [[MWPassthroughView alloc] init];
-        vc.view = ptView;
-        vc.view.backgroundColor = [UIColor clearColor];
-    }
-
-    window.windowLevel = UIWindowLevelAlert - 1;
-    [MWPassthroughWindow setSharedInstance:window];
-    window.hidden = NO;
+    mw_ensurePassthroughWindow();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [MWSettingsWindow setupIfNeeded];
+    });
     MW_LOG(@"Passthrough window created");
+}
+%end
+
+// iOS 16 can create the homescreen window/view after SpringBoard launch hooks run.
+// Attach the settings button when the homescreen view actually lands in a window.
+%hook SBHomeScreenView
+- (void)didMoveToWindow {
+    %orig;
+    if (((UIView *)self).window) {
+        [MWSettingsWindow attachToWindow:((UIView *)self).window];
+    }
+}
+%end
+
+%hook SBRootFolderView
+- (void)didMoveToWindow {
+    %orig;
+    if (((UIView *)self).window) {
+        [MWSettingsWindow attachToWindow:((UIView *)self).window];
+    }
 }
 %end
 
@@ -698,6 +788,8 @@ static void mw_createWindowForApp(NSString *bundleID, NSString *sceneID) {
         _activeAssertions = [NSMutableDictionary new];
         [MWBackgrounderManager sharedInstance];
         MW_LOG(@"Loaded (iOS %@)", [[UIDevice currentDevice] systemVersion]);
+        mw_startSettingsSetupRetry();
+
         %init;
     }
 }

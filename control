@@ -6,4 +6,3 @@ Description: Windowed multitasking for iOS 17-18 and 26. A modern rewrite of Mil
 Maintainer: MilkyWay Reborn
 Author: MilkyWay Reborn
 Section: Tweaks
-Depends: mobilesubstrate (>= 0.9.5000)

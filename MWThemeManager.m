@@ -1,7 +1,6 @@
 #import "MWThemeManager.h"
 
 #define THEME_PATH @"/var/mobile/Library/Preferences/com.milkyway.reborn.theme.plist"
-#define THEME_DEFAULT_PATH @"/var/mobile/Library/Preferences/com.milkyway.reborn.theme.default.plist"
 
 static UIColor *colorFromDict(NSDictionary *dict) {
     if (!dict) return [UIColor grayColor];
@@ -42,9 +41,6 @@ static CGRect frameFromDict(NSDictionary *dict) {
 
 - (void)reload {
     NSDictionary *theme = [NSDictionary dictionaryWithContentsOfFile:THEME_PATH];
-    if (!theme) {
-        theme = [NSDictionary dictionaryWithContentsOfFile:THEME_DEFAULT_PATH];
-    }
     if (!theme) {
         [self loadDefaults];
         return;
